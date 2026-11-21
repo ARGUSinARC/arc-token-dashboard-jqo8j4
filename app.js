@@ -7,7 +7,7 @@
   var CREATOR = '0x7d613c6316ede9d257f3bf512777cb4ea4a6bee4';
   var LIVE_MS = 60000, SNAP_MS = 600000;
   var TZ = 'Asia/Taipei';
-  var FILES = ['summary', 'daily', 'addresses', 'hft', 'cex_snapshots', 'cex_daily', 'argus_stats', 'liquidity_history'];
+  var FILES = ['summary', 'daily', 'addresses', 'hft', 'cex_snapshots', 'cex_daily', 'argus_stats', 'liquidity_history', 'gt_snapshot'];
   var D = {}; var L = {}; var charts = {}; var cluster = {}; var ohlcvTf = 'hour';
   var lastSnapLoad = 0, nextAt = 0;
 
@@ -78,9 +78,6 @@
   function loadLive() {
     var jobs = {
       dex: getJSON('https://api.dexscreener.com/latest/dex/tokens/' + TOKEN),
-      gtV3: getJSON(GT + V3 + '/trades'),
-      gtV4: getJSON(GT + V4 + '/trades'),
-      ohlcv: getJSON(GT + V3 + '/ohlcv/' + ohlcvTf + '?aggregate=1&limit=' + (ohlcvTf === 'hour' ? 168 : 90) + '&currency=usd'),
       gateT: getJSON('https://api.gateio.ws/api/v4/spot/tickers?currency_pair=ARGUS_USDT'),
       gateB: getJSON('https://api.gateio.ws/api/v4/spot/order_book?currency_pair=ARGUS_USDT&limit=200'),
       gateX: getJSON('https://api.gateio.ws/api/v4/spot/trades?currency_pair=ARGUS_USDT&limit=500'),
@@ -89,7 +86,44 @@
       weexX: getJSON('https://api-spot.weex.com/api/v3/market/trades?symbol=ARGUSUSDT&limit=1000')
     };
     var keys = Object.keys(jobs);
+    gtRefresh();
     return Promise.all(keys.map(function (k) { return jobs[k].then(function (v) { L[k] = v; L[k + '_err'] = null; }, function (e) { L[k + '_err'] = String(e.message || e); }); }));
+  }
+
+  // ---------- GeckoTerminal: cached, staggered, backed-off (public API ~30 calls/min per IP; 429 has no CORS header -> "Failed to fetch") ----------
+  var GTK = { gtV3: { url: function () { return GT + V3 + '/trades'; }, ttl: 110000 }, gtV4: { url: function () { return GT + V4 + '/trades'; }, ttl: 110000 },
+    ohlcv: { url: function () { return GT + V3 + '/ohlcv/' + ohlcvTf + '?aggregate=1&limit=' + (ohlcvTf === 'hour' ? 168 : 90) + '&currency=usd'; }, ttl: 900000, key: function () { return 'ohlcv_' + ohlcvTf; } } };
+  var gtState = {}; // k -> {t: last good ms, fail: n, next: ms, src: 'live'|'cache'|'snapshot'}
+  function lsGet(k) { try { var v = localStorage.getItem('argusdash_' + k); return v ? JSON.parse(v) : null; } catch (e) { return null; } }
+  function lsSet(k, v) { try { localStorage.setItem('argusdash_' + k, JSON.stringify(v)); } catch (e) { } }
+  function gtKey(k) { return GTK[k].key ? GTK[k].key() : k; }
+  function gtFetch(k) {
+    var ck = gtKey(k), st = gtState[ck] = gtState[ck] || { fail: 0, next: 0 }, now = Date.now(), c = lsGet(ck);
+    if (c && now - c.t < GTK[k].ttl) { L[k] = c.v; st.t = c.t; st.src = 'cache'; return Promise.resolve(); }
+    var bo = lsGet('bo_' + ck); if (bo && bo.next > now) { if (c) { L[k] = c.v; st.t = c.t; } st.stale = true; return Promise.resolve(); }
+    var lock = lsGet('lock_' + ck); if (lock && now - lock < 15000) { return new Promise(function (r) { setTimeout(function () { var c2 = lsGet(ck); if (c2) { L[k] = c2.v; st.t = c2.t; } r(); }, 4000); }); }
+    lsSet('lock_' + ck, now);
+    return getJSON(GTK[k].url(), 15000).then(function (v) {
+      L[k] = v; st.t = Date.now(); st.fail = 0; st.stale = false; st.src = 'live'; lsSet(ck, { t: st.t, v: v }); lsSet('bo_' + ck, null); lsSet('lock_' + ck, 0);
+    }, function (e) {
+      st.fail = ((lsGet('bo_' + ck) || {}).fail || 0) + 1; var wait = Math.min(900000, 60000 * Math.pow(2, st.fail - 1));
+      lsSet('bo_' + ck, { fail: st.fail, next: Date.now() + wait }); lsSet('lock_' + ck, 0); st.stale = true; st.err = String(e.message || e);
+      if (c) { L[k] = c.v; st.t = c.t; } console.warn('GeckoTerminal', ck, st.err, 'retry in', wait / 1000, 's');
+    });
+  }
+  function gtRefresh() {
+    // staggered: V3 trades now, V4 trades +6s, OHLCV +12s (OHLCV TTL 15 min, so normally only on load / range switch)
+    gtFetch('gtV3').then(function () { safe(renderLive); safe(renderRisk); });
+    setTimeout(function () { gtFetch('gtV4').then(function () { safe(renderLive); safe(renderRisk); }); }, 6000);
+    setTimeout(function () { gtFetch('ohlcv').then(function () { safe(renderLive); }); }, 12000);
+  }
+  function hhmm(t) { return (t && isFinite(t)) ? new Date(t).toLocaleTimeString('zh-TW', { timeZone: TZ, hour12: false, hour: '2-digit', minute: '2-digit' }) : '—'; }
+  function gtNote() {
+    var a = gtState.gtV3 || {}, b = gtState.gtV4 || {}, snap = D.gt_snapshot;
+    var haveLive = L.gtV3 || L.gtV4;
+    if (!haveLive) return snap ? '暫時無法更新，顯示伺服器快照 ' + (snap.generated_at || '').slice(11, 16) + ' 的資料' : '暫時無法更新，稍後自動重試';
+    if (a.stale || b.stale) return '暫時無法更新，顯示 ' + hhmm(Math.min(a.t || Infinity, b.t || Infinity)) + ' 的資料（稍後自動重試）';
+    return '成交資料時間 ' + hhmm(Math.min(a.t || Infinity, b.t || Infinity)) + '（約每 2 分鐘更新）';
   }
 
   // ---------- live derived ----------
@@ -101,8 +135,9 @@
   function livePrice() { var m = mainPair(); return m ? num(m.priceUsd) : null; }
   function liveTrades() {
     var out = [];
+    var snap = D.gt_snapshot || {};
     [['gtV3', 'V3 主池'], ['gtV4', 'V4 USDC']].forEach(function (k) {
-      ((L[k[0]] && L[k[0]].data) || []).forEach(function (t) { var a = t.attributes; out.push({ t: new Date(a.block_timestamp), pool: k[1], kind: a.kind, usd: num(a.volume_in_usd), from: a.tx_from_address, tx: a.tx_hash, argus: a.kind === 'buy' ? num(a.to_token_amount) : num(a.from_token_amount), price: a.kind === 'buy' ? num(a.price_to_in_usd) : num(a.price_from_in_usd) }); });
+      ((L[k[0]] && L[k[0]].data) || (snap[k[0]] && snap[k[0]].data) || []).forEach(function (t) { var a = t.attributes; out.push({ t: new Date(a.block_timestamp), pool: k[1], kind: a.kind, usd: num(a.volume_in_usd), from: a.tx_from_address, tx: a.tx_hash, argus: a.kind === 'buy' ? num(a.to_token_amount) : num(a.from_token_amount), price: a.kind === 'buy' ? num(a.price_to_in_usd) : num(a.price_from_in_usd) }); });
     });
     return out.sort(function (a, b) { return b.t - a.t; });
   }
@@ -225,8 +260,10 @@
     var tr = liveTrades().slice(0, 60);
     $('liveTrades').replaceChildren(tr.length ? table(['時間', '池', '方向', '金額', 'ARGUS', '價格', '地址', '交易'], tr.map(function (t) {
       return [tpe(t.t, true).replace('（UTC+8）', ''), t.pool, el('span', { cls: t.kind === 'buy' ? 'up' : 'down', text: t.kind === 'buy' ? '買' : '賣' }), usd(t.usd), nm(t.argus), px(t.price), addrCell(t.from), txLink(t.tx)];
-    }), { left: [0, 1, 6] }) : el('p', { cls: 'err', text: 'GeckoTerminal 成交讀取失敗：' + (L.gtV3_err || '') }));
-    var o = L.ohlcv && L.ohlcv.data && L.ohlcv.data.attributes && L.ohlcv.data.attributes.ohlcv_list;
+    }), { left: [0, 1, 6] }) : el('p', { cls: 'note', text: '成交資料載入中…' }));
+    $('liveTrades').insertBefore(el('p', { cls: 'note', text: gtNote() }), $('liveTrades').firstChild);
+    var oh = L.ohlcv || (ohlcvTf === 'hour' && D.gt_snapshot && D.gt_snapshot.ohlcv);
+    var o = oh && oh.data && oh.data.attributes && oh.data.attributes.ohlcv_list;
     if (o) {
       o = o.slice().reverse();
       var lab = o.map(function (x) { var d = new Date(x[0] * 1000); return ohlcvTf === 'hour' ? d.toLocaleString('zh-TW', { timeZone: TZ, month: '2-digit', day: '2-digit', hour: '2-digit', hour12: false }) : tpeDay(d).slice(5); });
@@ -322,10 +359,10 @@
     mkChart('cexVolChart', { type: 'line', data: { labels: ts.map(function (t) { return tpe(new Date(t * 1000)).slice(5, 17); }), datasets: keys.map(function (k, i) { return { label: EXN[k], data: ts.map(function (t) { return byTs[t][k] ? byTs[t][k].vol24_quote : null; }), borderColor: colors[i], pointRadius: 2, spanGaps: true }; }) }, options: { scales: { y: { type: 'logarithmic', ticks: { callback: function (v) { return usd(v); } } } } } });
   }
   function renderFiles() {
-    var names = { summary: '總覽與 7 天資金流', daily: '每日收入／回購／銷毀／成交', addresses: '大額地址、大額成交、持有者', hft: '小額高頻交易', cex_snapshots: '交易所每 4 小時快照', cex_daily: '交易所每日統計', argus_stats: 'argus.world 平台數據', liquidity_history: '流動性歷史（風險評級用）' };
-    var live = [['DexScreener（價格、流動性、24h 量）', !L.dex_err], ['GeckoTerminal（最新成交、K 線）', !L.gtV3_err], ['Gate（行情、深度、成交）', !L.gateT_err], ['WEEX（行情、深度、成交）', !L.weexT_err]];
+    var names = { summary: '總覽與 7 天資金流', daily: '每日收入／回購／銷毀／成交', addresses: '大額地址、大額成交、持有者', hft: '小額高頻交易', cex_snapshots: '交易所每 4 小時快照', cex_daily: '交易所每日統計', argus_stats: 'argus.world 平台數據', liquidity_history: '流動性歷史（風險評級用）', gt_snapshot: 'GeckoTerminal 成交與 K 線備援快照' };
+    var live = [['DexScreener（價格、流動性、24h 量）', !L.dex_err], ['GeckoTerminal（最新成交、K 線）', (gtState.gtV3 || {}).stale ? null : true], ['Gate（行情、深度、成交）', !L.gateT_err], ['WEEX（行情、深度、成交）', !L.weexT_err]];
     put('filesBody', [card('快照資料檔（由伺服器每 4 小時與每天 09:00 重新產生）', [table(['檔案', '內容', '資料產生時間'], FILES.map(function (f) { return ['data/' + f + '.json', names[f], D[f] ? (D[f].generated_at || '—') : '讀取失敗']; }), { left: [0, 1, 2] })]),
-      card('即時來源（瀏覽器直接讀取，每 60 秒）', [table(['來源', '狀態'], live.map(function (x) { return [x[0], x[1] ? '正常' : '讀取失敗']; }), { left: [0, 1] })], 'LBank、MEXC、argus.world 不允許瀏覽器跨網域讀取（CORS），所以只能用伺服器快照。')]);
+      card('即時來源（瀏覽器直接讀取，每 60 秒）', [table(['來源', '狀態'], live.map(function (x) { return [x[0], x[1] === null ? '暫時無法更新（改用快取或伺服器快照）' : x[1] ? '正常' : '讀取失敗']; }), { left: [0, 1] })], 'LBank、MEXC、argus.world 不允許瀏覽器跨網域讀取（CORS），所以只能用伺服器快照。')]);
   }
   function renderMethod() {
     put('methodBody', [card(null, [el('ul', null, [
@@ -348,7 +385,7 @@
   }
   function tick() { var s = Math.max(0, Math.round((nextAt - Date.now()) / 1000)); $('nextUpdate').textContent = nextAt ? s + ' 秒後自動更新' : ''; if (nextAt && Date.now() >= nextAt) { nextAt = 0; refresh(); } }
   function buildToc() { var n = $('toc'); document.querySelectorAll('main section').forEach(function (s) { var h = s.querySelector('h2'); n.appendChild(el('a', { href: '#' + s.id, text: h.textContent })); }); }
-  function initSeg() { var host = $('ohlcvSeg'); function draw() { host.replaceChildren(seg([['hour', '7 天（小時）'], ['day', '90 天（日）']], ohlcvTf, function (v) { ohlcvTf = v; draw(); getJSON(GT + V3 + '/ohlcv/' + v + '?aggregate=1&limit=' + (v === 'hour' ? 168 : 90) + '&currency=usd').then(function (j) { L.ohlcv = j; safe(renderLive); }); })); } draw(); }
+  function initSeg() { var host = $('ohlcvSeg'); function draw() { host.replaceChildren(seg([['hour', '7 天（小時）'], ['day', '90 天（日）']], ohlcvTf, function (v) { ohlcvTf = v; draw(); L.ohlcv = null; var c = lsGet(gtKey('ohlcv')); if (c) L.ohlcv = c.v; safe(renderLive); gtFetch('ohlcv').then(function () { safe(renderLive); }); })); } draw(); }
   document.addEventListener('DOMContentLoaded', function () {
     buildToc(); initSeg();
     $('refreshBtn').addEventListener('click', function () { lastSnapLoad = 0; refresh(); });
