@@ -1,0 +1,7 @@
+*.log
+*.pem
+*.key
+id_*
+.env
+.DS_Store
+node_modules/

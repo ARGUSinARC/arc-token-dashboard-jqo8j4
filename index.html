@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://api.dexscreener.com https://api.geckoterminal.com https://api.gateio.ws https://api-spot.weex.com; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; worker-src 'none'; manifest-src 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex,nofollow,noarchive">
+<meta name="color-scheme" content="light dark">
+<title>ARGUS 交易分析（即時）</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div>
+    <h1>ARGUS 交易分析</h1>
+    <p class="sub">$ARGUS（Arc 鏈）<span class="mono">0xece5…cb3c</span> · 鏈上與交易所公開數據 · 時間皆為台北時間（UTC+8）</p>
+  </div>
+  <div class="refresh">
+    <div>最後更新：<b id="lastUpdate">載入中…</b></div>
+    <div class="muted" id="nextUpdate"></div>
+    <button id="refreshBtn" type="button">立即重新整理</button>
+  </div>
+</header>
+<nav class="toc" id="toc"></nav>
+<main>
+  <section id="risk"><h2>項目風險評級</h2><div id="riskBody" class="card">計算中…</div></section>
+  <section id="live"><h2>即時行情（鏈上）</h2><div id="liveMetrics" class="metrics"></div>
+    <div class="card"><div class="row-between"><h3>價格與成交量（GeckoTerminal V3 主池）</h3><div class="seg" id="ohlcvSeg"></div></div><div class="chartbox"><canvas id="ohlcvChart"></canvas></div></div>
+    <div class="card"><h3>最新鏈上成交（V3 主池＋V4 USDC 池）</h3><div id="liveTrades" class="tablewrap"></div></div>
+  </section>
+  <section id="cexlive"><h2>交易所即時與快照</h2><div id="cexLive"></div></section>
+  <section id="platform"><h2>Argus 平台數據</h2><div id="platformBody"></div></section>
+  <section id="revenue"><h2>每日收入、回購與銷毀</h2><div id="revenueBody"></div></section>
+  <section id="history"><h2>價格與成交量歷史</h2><div id="historyBody"></div></section>
+  <section id="team"><h2>項目方與疑似項目方關聯地址</h2><div id="teamBody"></div></section>
+  <section id="big"><h2>大額地址與大額成交</h2><div id="bigBody"></div></section>
+  <section id="hft"><h2>小額高頻交易</h2><div id="hftBody"></div></section>
+  <section id="cexstats"><h2>交易所快照統計（每 4 小時快照 × 每日彙整）</h2><div id="cexStatsBody"></div></section>
+  <section id="files"><h2>資料來源與更新時間</h2><div id="filesBody"></div></section>
+  <section id="method"><h2>方法與限制</h2><div id="methodBody"></div></section>
+</main>
+<footer>資料來自公開鏈上與交易所 API，僅供個人研究，非投資建議。標記為「推論」的內容是依鏈上資金往來所做的判斷，不是身分認定。</footer>
+<script src="vendor/chart.umd.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
